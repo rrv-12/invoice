@@ -1,0 +1,16 @@
+# Render Blueprint - One-click deployment
+# https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: invoice-extraction-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false  # You'll set this manually in dashboard
+      - key: PYTHON_VERSION
+        value: 3.10.12
+    healthCheckPath: /health
+    plan: free
