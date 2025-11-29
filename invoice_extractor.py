@@ -1,11 +1,12 @@
 """
 Invoice Extractor using Google Gemini Vision API
-- Simple, robust extraction
-- Handles Gemini blocked responses
-- Processes within 150 seconds
+- Proper safety settings to avoid blocks
+- Retry mechanism for blocked responses
+- Optimized for < 150 seconds
 """
 
 import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import requests
 from io import BytesIO
 from PIL import Image
@@ -13,41 +14,48 @@ import json
 import re
 import logging
 import time
-from typing import List, Dict, Optional
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 class InvoiceExtractor:
     def __init__(self, api_key: str):
-        """Initialize Gemini with API key"""
+        """Initialize Gemini"""
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-2.5-flash')
+        self.model = genai.GenerativeModel('gemini-1.5-flash')
         
-        # Token tracking
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         
-        # Safety settings to prevent blocked responses
-        self.safety_settings = [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        ]
+        # CORRECT safety settings format
+        self.safety_settings = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+        }
         
-        # Simple extraction prompt
-        self.prompt = """Extract ALL line items from this invoice. Return JSON only.
+        # Primary prompt
+        self.prompt = """You are an invoice data extractor. Extract ALL line items from this medical bill image.
+
+Return a JSON object with this exact structure:
+{"page_type":"Bill Detail","bill_items":[{"item_name":"Item Name","item_amount":100.00,"item_rate":100.00,"item_quantity":1}]}
 
 Rules:
-- Extract every row with amounts as separate item
-- Skip headers, totals, patient info
-- item_quantity: just the number (ignore "No", "Nos")
+- Extract EVERY row that has a price/amount
+- item_name: exactly as shown in bill
+- item_amount: the final/net amount (rightmost number column)
+- item_rate: the rate/gross amount if shown
+- item_quantity: just the number (if it says "1 No" or "2 Nos", extract 1 or 2)
+- Skip totals, subtotals, headers
+- page_type: "Pharmacy" for medicines, "Final Bill" for summary page, "Bill Detail" for detailed items
 
-Format:
-{"page_type":"Bill Detail","bill_items":[{"item_name":"Name","item_amount":100.0,"item_rate":100.0,"item_quantity":1}]}
+Return ONLY the JSON object, no explanation."""
 
-page_type: "Pharmacy" for medicines, "Final Bill" for summary, "Bill Detail" otherwise.
-Return ONLY valid JSON."""
+        # Simpler backup prompt for retry
+        self.simple_prompt = """Extract bill items as JSON:
+{"page_type":"Bill Detail","bill_items":[{"item_name":"X","item_amount":0.0}]}
+List all items with prices. Return only JSON."""
 
     def reset_token_count(self):
         self.total_input_tokens = 0
@@ -61,7 +69,7 @@ Return ONLY valid JSON."""
         }
     
     def extract_from_url(self, url: str) -> Dict:
-        """Extract invoice data from image or PDF URL"""
+        """Main entry point"""
         self.reset_token_count()
         
         try:
@@ -86,7 +94,7 @@ Return ONLY valid JSON."""
             raise
     
     def extract_from_pdf(self, pdf_content: bytes) -> Dict:
-        """Extract from PDF - one page at a time"""
+        """Extract from PDF with optimized timing"""
         try:
             import fitz
             
@@ -97,9 +105,9 @@ Return ONLY valid JSON."""
             all_pages = []
             total_items = 0
             
-            # Calculate delay to fit within 150 seconds
-            # Reserve 30 sec for overhead, 120 sec for pages
-            delay = min(3, 120 / max(num_pages, 1))
+            # Optimized delay: target 120 seconds total for API calls
+            # Leave 30 sec buffer for download/processing
+            delay = max(1.5, min(3, 100 / max(num_pages, 1)))
             
             for page_num in range(num_pages):
                 if page_num > 0:
@@ -107,18 +115,19 @@ Return ONLY valid JSON."""
                 
                 logger.info(f"Page {page_num + 1}/{num_pages}")
                 
-                # Convert to image
+                # Convert to image with moderate quality
                 page = pdf[page_num]
-                pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                # Use 1.2x zoom instead of 1.5x for faster processing
+                pix = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2))
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                 
-                # Resize if large
-                if max(img.size) > 1200:
-                    ratio = 1200 / max(img.size)
+                # Resize to max 1000px (smaller = faster + less likely to be blocked)
+                if max(img.size) > 1000:
+                    ratio = 1000 / max(img.size)
                     img = img.resize((int(img.size[0]*ratio), int(img.size[1]*ratio)), Image.LANCZOS)
                 
-                # Extract
-                result = self.extract_page(img, page_num + 1)
+                # Extract with retry
+                result = self.extract_page_with_retry(img, page_num + 1)
                 if result and result.get('bill_items'):
                     all_pages.append(result)
                     total_items += len(result['bill_items'])
@@ -141,7 +150,12 @@ Return ONLY valid JSON."""
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            result = self.extract_page(img, 1)
+            # Resize if needed
+            if max(img.size) > 1000:
+                ratio = 1000 / max(img.size)
+                img = img.resize((int(img.size[0]*ratio), int(img.size[1]*ratio)), Image.LANCZOS)
+            
+            result = self.extract_page_with_retry(img, 1)
             
             return {
                 "pagewise_line_items": [result] if result else [],
@@ -151,13 +165,30 @@ Return ONLY valid JSON."""
             logger.error(f"Image error: {str(e)}")
             raise
     
-    def extract_page(self, image: Image.Image, page_num: int) -> Dict:
-        """Extract from single page with proper error handling"""
-        empty_result = {"page_no": str(page_num), "page_type": "Bill Detail", "bill_items": []}
+    def extract_page_with_retry(self, image: Image.Image, page_num: int) -> Dict:
+        """Extract with retry on failure"""
+        # First attempt with main prompt
+        result = self.call_gemini(image, page_num, self.prompt)
         
+        if result and result.get('bill_items'):
+            return result
+        
+        # Retry with simpler prompt
+        logger.info(f"Page {page_num}: Retrying with simple prompt")
+        time.sleep(1)
+        result = self.call_gemini(image, page_num, self.simple_prompt)
+        
+        if result and result.get('bill_items'):
+            return result
+        
+        # Return empty if both fail
+        return {"page_no": str(page_num), "page_type": "Bill Detail", "bill_items": []}
+    
+    def call_gemini(self, image: Image.Image, page_num: int, prompt: str) -> Optional[Dict]:
+        """Call Gemini API with proper error handling"""
         try:
             response = self.model.generate_content(
-                [self.prompt, image],
+                [prompt, image],
                 generation_config=genai.types.GenerationConfig(
                     temperature=0.1,
                     max_output_tokens=4096,
@@ -170,50 +201,40 @@ Return ONLY valid JSON."""
                 self.total_input_tokens += getattr(response.usage_metadata, 'prompt_token_count', 0)
                 self.total_output_tokens += getattr(response.usage_metadata, 'candidates_token_count', 0)
             else:
-                self.total_input_tokens += 500
+                self.total_input_tokens += 400
                 self.total_output_tokens += 200
             
-            # SAFE text extraction - handles blocked responses
-            text = self.get_response_text(response)
-            if not text:
-                logger.warning(f"Page {page_num}: No response text")
-                return empty_result
-            
-            # Parse
-            result = self.parse_json(text)
-            if result:
-                result['page_no'] = str(page_num)
-                return result
-            
-            return empty_result
-            
-        except Exception as e:
-            logger.error(f"Page {page_num} error: {str(e)}")
-            return empty_result
-    
-    def get_response_text(self, response) -> Optional[str]:
-        """Safely extract text from Gemini response"""
-        try:
-            # Check if response has candidates
+            # Check for blocked response
             if not response.candidates:
+                logger.warning(f"Page {page_num}: No candidates in response")
                 return None
             
             candidate = response.candidates[0]
             
-            # Check finish reason (2 = blocked)
-            if hasattr(candidate, 'finish_reason') and candidate.finish_reason == 2:
-                logger.warning("Response blocked by safety filter")
+            # Check finish reason
+            # 0=UNSPECIFIED, 1=STOP (good), 2=MAX_TOKENS, 3=SAFETY, 4=RECITATION, 5=OTHER
+            finish_reason = getattr(candidate, 'finish_reason', None)
+            if finish_reason and finish_reason.value in [3, 4]:  # SAFETY or RECITATION
+                logger.warning(f"Page {page_num}: Response blocked (reason: {finish_reason})")
                 return None
             
-            # Check if has content parts
+            # Get text
             if not hasattr(candidate, 'content') or not candidate.content.parts:
+                logger.warning(f"Page {page_num}: No content in response")
                 return None
             
-            # Get text from parts
-            return candidate.content.parts[0].text
+            text = candidate.content.parts[0].text
+            if not text:
+                return None
+            
+            # Parse JSON
+            result = self.parse_json(text)
+            if result:
+                result['page_no'] = str(page_num)
+            return result
             
         except Exception as e:
-            logger.warning(f"Could not get response text: {e}")
+            logger.error(f"Page {page_num}: API error - {str(e)}")
             return None
     
     def parse_json(self, text: str) -> Optional[Dict]:
@@ -221,15 +242,20 @@ Return ONLY valid JSON."""
         try:
             text = text.strip()
             
-            # Remove markdown
-            if text.startswith('```'):
-                text = re.sub(r'^```json?\n?', '', text)
-                text = re.sub(r'\n?```$', '', text)
+            # Remove markdown code blocks
+            text = re.sub(r'^```json?\s*\n?', '', text)
+            text = re.sub(r'\n?```$', '', text)
+            text = text.strip()
             
             # Find JSON object
             match = re.search(r'\{[\s\S]*\}', text)
             if match:
                 text = match.group()
+            
+            # Fix common JSON issues
+            text = text.replace('\n', ' ')
+            text = re.sub(r',\s*}', '}', text)  # Remove trailing commas
+            text = re.sub(r',\s*]', ']', text)
             
             data = json.loads(text)
             
@@ -260,15 +286,17 @@ Return ONLY valid JSON."""
                 if bill_item["item_name"] and bill_item["item_amount"] > 0:
                     result["bill_items"].append(bill_item)
             
-            return result
+            return result if result["bill_items"] else None
             
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON parse error: {e}")
             return self.regex_extract(text)
-        except:
+        except Exception as e:
+            logger.warning(f"Parse error: {e}")
             return None
     
     def regex_extract(self, text: str) -> Optional[Dict]:
-        """Fallback: extract items with regex"""
+        """Fallback regex extraction"""
         try:
             names = re.findall(r'"item_name"\s*:\s*"([^"]+)"', text)
             amounts = re.findall(r'"item_amount"\s*:\s*([\d.]+)', text)
@@ -291,7 +319,7 @@ Return ONLY valid JSON."""
             if items:
                 page_type = "Bill Detail"
                 m = re.search(r'"page_type"\s*:\s*"([^"]+)"', text)
-                if m:
+                if m and m.group(1) in ["Bill Detail", "Final Bill", "Pharmacy"]:
                     page_type = m.group(1)
                 return {"page_no": "1", "page_type": page_type, "bill_items": items}
             
@@ -306,21 +334,23 @@ Return ONLY valid JSON."""
         if isinstance(val, (int, float)):
             return float(val)
         try:
-            return float(str(val).replace(',', '').replace('₹', '').strip())
+            s = str(val).replace(',', '').replace('₹', '').replace('Rs.', '').replace('Rs', '').strip()
+            m = re.search(r'[\d.]+', s)
+            return float(m.group()) if m else 0.0
         except:
             return 0.0
     
     def parse_qty(self, val) -> float:
-        """Parse quantity (handles '1 No' format)"""
+        """Parse quantity"""
         if val is None:
             return 0.0
         if isinstance(val, (int, float)):
             return float(val)
         try:
             s = str(val)
-            for suffix in [' No', ' Nos', 'No', 'Nos', ' Units']:
-                s = s.replace(suffix, '')
-            m = re.search(r'([\d.]+)', s)
-            return float(m.group(1)) if m else 0.0
+            # Remove unit suffixes
+            s = re.sub(r'\s*(No|Nos|Units?|Pcs?|Qty)\.?\s*', '', s, flags=re.IGNORECASE)
+            m = re.search(r'[\d.]+', s)
+            return float(m.group()) if m else 0.0
         except:
             return 0.0
