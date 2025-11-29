@@ -33,6 +33,7 @@ app = FastAPI(
 
 # Initialize extractor (will be initialized per request if API key changes)
 extractor = None
+last_response = None  # Store last response for debugging
 
 def get_extractor():
     global extractor
@@ -91,9 +92,17 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "invoice-extraction",
-        "model": "gemini-2.5-flash",
+        "model": "gemini-1.5-flash",
         "api_key_configured": bool(GEMINI_API_KEY)
     }
+
+@app.get("/last-response")
+async def get_last_response():
+    """Get the last extraction response for debugging"""
+    global last_response
+    if last_response:
+        return last_response
+    return {"message": "No extraction performed yet"}
 
 @app.post("/extract-bill-data", response_model=ExtractionResponse)
 async def extract_bill_data(request: ExtractionRequest):
@@ -151,7 +160,7 @@ async def extract_bill_data(request: ExtractionRequest):
             pagewise_items.append(page_items)
         
         # Build response
-        return ExtractionResponse(
+        response_data = ExtractionResponse(
             is_success=True,
             token_usage=TokenUsage(
                 total_tokens=token_usage["total_tokens"],
@@ -164,17 +173,33 @@ async def extract_bill_data(request: ExtractionRequest):
             )
         )
         
+        # Store for debugging
+        global last_response
+        last_response = response_data.model_dump()
+        
+        # Log summary
+        logger.info(f"Response: {result.get('total_item_count', 0)} items across {len(pagewise_items)} pages")
+        
+        return response_data
+        
     except HTTPException:
         raise
     except Exception as e:
         elapsed = time.time() - start_time
         logger.error(f"Extraction failed after {elapsed:.1f}s: {str(e)}", exc_info=True)
-        return ExtractionResponse(
+        
+        error_response = ExtractionResponse(
             is_success=False,
             token_usage=TokenUsage(total_tokens=0, input_tokens=0, output_tokens=0),
             data=None,
             error=str(e)
         )
+        
+        # Store for debugging
+        global last_response
+        last_response = error_response.model_dump()
+        
+        return error_response
 
 # ============== Run Server ==============
 

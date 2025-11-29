@@ -1,8 +1,8 @@
 """
-Invoice Extractor using Google Gemini Vision API
-- Proper safety settings to avoid blocks
-- Retry mechanism for blocked responses
-- Optimized for < 150 seconds
+Invoice Extractor - Final Optimized Version
+- Handles truncated JSON responses
+- Fast processing under 150 seconds
+- Robust error handling
 """
 
 import google.generativeai as genai
@@ -14,20 +14,19 @@ import json
 import re
 import logging
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 logger = logging.getLogger(__name__)
 
 class InvoiceExtractor:
     def __init__(self, api_key: str):
-        """Initialize Gemini"""
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-2.5-flash')
+        self.model = genai.GenerativeModel('gemini-1.5-flash')
         
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         
-        # CORRECT safety settings format
+        # Disable all safety filters
         self.safety_settings = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
             HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -35,27 +34,18 @@ class InvoiceExtractor:
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
         
-        # Primary prompt
-        self.prompt = """You are an invoice data extractor. Extract ALL line items from this medical bill image.
-
-Return a JSON object with this exact structure:
-{"page_type":"Bill Detail","bill_items":[{"item_name":"Item Name","item_amount":100.00,"item_rate":100.00,"item_quantity":1}]}
+        # Ultra-compact prompt for faster response
+        self.prompt = """Extract bill items as JSON. Format:
+{"page_type":"Bill Detail","bill_items":[{"item_name":"X","item_amount":100.0,"item_rate":100.0,"item_quantity":1}]}
 
 Rules:
-- Extract EVERY row that has a price/amount
-- item_name: exactly as shown in bill
-- item_amount: the final/net amount (rightmost number column)
-- item_rate: the rate/gross amount if shown
-- item_quantity: just the number (if it says "1 No" or "2 Nos", extract 1 or 2)
-- Skip totals, subtotals, headers
-- page_type: "Pharmacy" for medicines, "Final Bill" for summary page, "Bill Detail" for detailed items
-
-Return ONLY the JSON object, no explanation."""
-
-        # Simpler backup prompt for retry
-        self.simple_prompt = """Extract bill items as JSON:
-{"page_type":"Bill Detail","bill_items":[{"item_name":"X","item_amount":0.0}]}
-List all items with prices. Return only JSON."""
+- Extract ALL items with prices
+- item_amount = Total/Net amount (last column)
+- item_rate = Rate per unit
+- item_quantity = just number (ignore "No")
+- page_type: Pharmacy/Bill Detail/Final Bill
+- Skip totals, headers, taxes
+Return ONLY JSON."""
 
     def reset_token_count(self):
         self.total_input_tokens = 0
@@ -69,7 +59,6 @@ List all items with prices. Return only JSON."""
         }
     
     def extract_from_url(self, url: str) -> Dict:
-        """Main entry point"""
         self.reset_token_count()
         
         try:
@@ -94,7 +83,6 @@ List all items with prices. Return only JSON."""
             raise
     
     def extract_from_pdf(self, pdf_content: bytes) -> Dict:
-        """Extract from PDF with optimized timing"""
         try:
             import fitz
             
@@ -105,9 +93,8 @@ List all items with prices. Return only JSON."""
             all_pages = []
             total_items = 0
             
-            # Optimized delay: target 120 seconds total for API calls
-            # Leave 30 sec buffer for download/processing
-            delay = max(1.5, min(3, 100 / max(num_pages, 1)))
+            # Fast delay: aim for ~10s per page max
+            delay = 1.5 if num_pages <= 10 else 1.0
             
             for page_num in range(num_pages):
                 if page_num > 0:
@@ -115,22 +102,23 @@ List all items with prices. Return only JSON."""
                 
                 logger.info(f"Page {page_num + 1}/{num_pages}")
                 
-                # Convert to image with moderate quality
+                # Convert to image - lower quality for speed
                 page = pdf[page_num]
-                # Use 1.2x zoom instead of 1.5x for faster processing
-                pix = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2))
+                pix = page.get_pixmap(matrix=fitz.Matrix(1.0, 1.0))  # 1x zoom
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                 
-                # Resize to max 1000px (smaller = faster + less likely to be blocked)
-                if max(img.size) > 1000:
-                    ratio = 1000 / max(img.size)
+                # Resize to max 800px for faster processing
+                if max(img.size) > 800:
+                    ratio = 800 / max(img.size)
                     img = img.resize((int(img.size[0]*ratio), int(img.size[1]*ratio)), Image.LANCZOS)
                 
-                # Extract with retry
-                result = self.extract_page_with_retry(img, page_num + 1)
+                # Extract
+                result = self.extract_page(img, page_num + 1)
                 if result and result.get('bill_items'):
                     all_pages.append(result)
-                    total_items += len(result['bill_items'])
+                    items_count = len(result['bill_items'])
+                    total_items += items_count
+                    logger.info(f"Page {page_num + 1}: Extracted {items_count} items")
             
             pdf.close()
             
@@ -144,54 +132,34 @@ List all items with prices. Return only JSON."""
             raise
     
     def extract_from_image(self, image_content: bytes) -> Dict:
-        """Extract from single image"""
         try:
             img = Image.open(BytesIO(image_content))
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            # Resize if needed
-            if max(img.size) > 1000:
-                ratio = 1000 / max(img.size)
+            if max(img.size) > 800:
+                ratio = 800 / max(img.size)
                 img = img.resize((int(img.size[0]*ratio), int(img.size[1]*ratio)), Image.LANCZOS)
             
-            result = self.extract_page_with_retry(img, 1)
+            result = self.extract_page(img, 1)
             
             return {
-                "pagewise_line_items": [result] if result else [],
+                "pagewise_line_items": [result] if result and result.get('bill_items') else [],
                 "total_item_count": len(result.get('bill_items', [])) if result else 0
             }
         except Exception as e:
             logger.error(f"Image error: {str(e)}")
             raise
     
-    def extract_page_with_retry(self, image: Image.Image, page_num: int) -> Dict:
-        """Extract with retry on failure"""
-        # First attempt with main prompt
-        result = self.call_gemini(image, page_num, self.prompt)
+    def extract_page(self, image: Image.Image, page_num: int) -> Dict:
+        empty_result = {"page_no": str(page_num), "page_type": "Bill Detail", "bill_items": []}
         
-        if result and result.get('bill_items'):
-            return result
-        
-        # Retry with simpler prompt
-        logger.info(f"Page {page_num}: Retrying with simple prompt")
-        time.sleep(1)
-        result = self.call_gemini(image, page_num, self.simple_prompt)
-        
-        if result and result.get('bill_items'):
-            return result
-        
-        # Return empty if both fail
-        return {"page_no": str(page_num), "page_type": "Bill Detail", "bill_items": []}
-    
-    def call_gemini(self, image: Image.Image, page_num: int, prompt: str) -> Optional[Dict]:
-        """Call Gemini API with proper error handling"""
         try:
             response = self.model.generate_content(
-                [prompt, image],
+                [self.prompt, image],
                 generation_config=genai.types.GenerationConfig(
                     temperature=0.1,
-                    max_output_tokens=4096,
+                    max_output_tokens=2048,  # Reduced to prevent truncation
                 ),
                 safety_settings=self.safety_settings
             )
@@ -201,155 +169,221 @@ List all items with prices. Return only JSON."""
                 self.total_input_tokens += getattr(response.usage_metadata, 'prompt_token_count', 0)
                 self.total_output_tokens += getattr(response.usage_metadata, 'candidates_token_count', 0)
             else:
-                self.total_input_tokens += 400
-                self.total_output_tokens += 200
+                self.total_input_tokens += 300
+                self.total_output_tokens += 150
             
-            # Check for blocked response
+            # Get text safely
+            text = self.safe_get_text(response)
+            if not text:
+                logger.warning(f"Page {page_num}: No response text")
+                return empty_result
+            
+            # Parse JSON with robust handling
+            result = self.parse_response(text, page_num)
+            return result if result else empty_result
+            
+        except Exception as e:
+            logger.error(f"Page {page_num}: {str(e)}")
+            return empty_result
+    
+    def safe_get_text(self, response) -> Optional[str]:
+        """Safely extract text from Gemini response"""
+        try:
             if not response.candidates:
-                logger.warning(f"Page {page_num}: No candidates in response")
                 return None
             
             candidate = response.candidates[0]
             
-            # Check finish reason
-            # 0=UNSPECIFIED, 1=STOP (good), 2=MAX_TOKENS, 3=SAFETY, 4=RECITATION, 5=OTHER
-            finish_reason = getattr(candidate, 'finish_reason', None)
-            if finish_reason and finish_reason.value in [3, 4]:  # SAFETY or RECITATION
-                logger.warning(f"Page {page_num}: Response blocked (reason: {finish_reason})")
-                return None
+            # Check if blocked
+            if hasattr(candidate, 'finish_reason'):
+                reason = candidate.finish_reason
+                # 1=STOP (good), 2=MAX_TOKENS (ok, truncated), 3=SAFETY (bad), 4=RECITATION (bad)
+                if hasattr(reason, 'value') and reason.value in [3, 4]:
+                    return None
             
-            # Get text
             if not hasattr(candidate, 'content') or not candidate.content.parts:
-                logger.warning(f"Page {page_num}: No content in response")
                 return None
             
-            text = candidate.content.parts[0].text
-            if not text:
-                return None
-            
-            # Parse JSON
-            result = self.parse_json(text)
-            if result:
-                result['page_no'] = str(page_num)
-            return result
-            
-        except Exception as e:
-            logger.error(f"Page {page_num}: API error - {str(e)}")
-            return None
-    
-    def parse_json(self, text: str) -> Optional[Dict]:
-        """Parse JSON from response"""
-        try:
-            text = text.strip()
-            
-            # Remove markdown code blocks
-            text = re.sub(r'^```json?\s*\n?', '', text)
-            text = re.sub(r'\n?```$', '', text)
-            text = text.strip()
-            
-            # Find JSON object
-            match = re.search(r'\{[\s\S]*\}', text)
-            if match:
-                text = match.group()
-            
-            # Fix common JSON issues
-            text = text.replace('\n', ' ')
-            text = re.sub(r',\s*}', '}', text)  # Remove trailing commas
-            text = re.sub(r',\s*]', ']', text)
-            
-            data = json.loads(text)
-            
-            # Build result
-            result = {
-                "page_no": "1",
-                "page_type": data.get("page_type", "Bill Detail"),
-                "bill_items": []
-            }
-            
-            if result["page_type"] not in ["Bill Detail", "Final Bill", "Pharmacy"]:
-                result["page_type"] = "Bill Detail"
-            
-            for item in data.get("bill_items", []):
-                bill_item = {
-                    "item_name": str(item.get("item_name", "")).strip(),
-                    "item_amount": self.parse_num(item.get("item_amount"))
-                }
-                
-                rate = self.parse_num(item.get("item_rate"))
-                if rate > 0:
-                    bill_item["item_rate"] = rate
-                
-                qty = self.parse_qty(item.get("item_quantity"))
-                if qty > 0:
-                    bill_item["item_quantity"] = qty
-                
-                if bill_item["item_name"] and bill_item["item_amount"] > 0:
-                    result["bill_items"].append(bill_item)
-            
-            return result if result["bill_items"] else None
-            
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON parse error: {e}")
-            return self.regex_extract(text)
-        except Exception as e:
-            logger.warning(f"Parse error: {e}")
-            return None
-    
-    def regex_extract(self, text: str) -> Optional[Dict]:
-        """Fallback regex extraction"""
-        try:
-            names = re.findall(r'"item_name"\s*:\s*"([^"]+)"', text)
-            amounts = re.findall(r'"item_amount"\s*:\s*([\d.]+)', text)
-            rates = re.findall(r'"item_rate"\s*:\s*([\d.]+)', text)
-            qtys = re.findall(r'"item_quantity"\s*:\s*([\d.]+)', text)
-            
-            if not names or not amounts:
-                return None
-            
-            items = []
-            for i in range(min(len(names), len(amounts))):
-                item = {"item_name": names[i], "item_amount": float(amounts[i])}
-                if i < len(rates):
-                    item["item_rate"] = float(rates[i])
-                if i < len(qtys):
-                    item["item_quantity"] = float(qtys[i])
-                if item["item_amount"] > 0:
-                    items.append(item)
-            
-            if items:
-                page_type = "Bill Detail"
-                m = re.search(r'"page_type"\s*:\s*"([^"]+)"', text)
-                if m and m.group(1) in ["Bill Detail", "Final Bill", "Pharmacy"]:
-                    page_type = m.group(1)
-                return {"page_no": "1", "page_type": page_type, "bill_items": items}
-            
-            return None
+            return candidate.content.parts[0].text
         except:
             return None
     
+    def parse_response(self, text: str, page_num: int) -> Optional[Dict]:
+        """Parse JSON with robust truncation handling"""
+        try:
+            text = text.strip()
+            
+            # Remove markdown
+            text = re.sub(r'^```json?\s*', '', text)
+            text = re.sub(r'\s*```$', '', text)
+            text = text.strip()
+            
+            # Try direct parse first
+            try:
+                match = re.search(r'\{[\s\S]*\}', text)
+                if match:
+                    json_text = match.group()
+                    # Fix common issues
+                    json_text = self.fix_json(json_text)
+                    data = json.loads(json_text)
+                    return self.build_result(data, page_num)
+            except json.JSONDecodeError:
+                pass
+            
+            # If direct parse fails, extract items with regex
+            return self.extract_items_regex(text, page_num)
+            
+        except Exception as e:
+            logger.warning(f"Parse error: {e}")
+            return self.extract_items_regex(text, page_num)
+    
+    def fix_json(self, text: str) -> str:
+        """Fix common JSON issues including truncation"""
+        # Remove newlines inside strings
+        result = []
+        in_string = False
+        for i, char in enumerate(text):
+            if char == '"' and (i == 0 or text[i-1] != '\\'):
+                in_string = not in_string
+            if char in '\n\r' and in_string:
+                result.append(' ')
+            else:
+                result.append(char)
+        text = ''.join(result)
+        
+        # Remove trailing commas
+        text = re.sub(r',\s*}', '}', text)
+        text = re.sub(r',\s*]', ']', text)
+        
+        # Try to fix truncated JSON by closing brackets
+        open_braces = text.count('{') - text.count('}')
+        open_brackets = text.count('[') - text.count(']')
+        
+        # If truncated mid-item, try to close it
+        if open_braces > 0 or open_brackets > 0:
+            # Remove incomplete last item
+            last_comma = text.rfind(',')
+            last_open_brace = text.rfind('{"item')
+            
+            if last_open_brace > last_comma:
+                # Truncated in middle of item, remove it
+                text = text[:last_open_brace].rstrip(',').rstrip()
+            
+            # Close brackets
+            text = text + ']' * open_brackets + '}' * open_braces
+        
+        return text
+    
+    def extract_items_regex(self, text: str, page_num: int) -> Optional[Dict]:
+        """Extract items using regex - handles truncated responses"""
+        try:
+            items = []
+            
+            # Pattern 1: Complete items
+            pattern = r'"item_name"\s*:\s*"([^"]+)"[^}]*?"item_amount"\s*:\s*([\d.]+)'
+            matches = re.findall(pattern, text, re.DOTALL)
+            
+            for name, amount in matches:
+                item = {"item_name": name.strip(), "item_amount": float(amount)}
+                
+                # Try to find rate and quantity for this item
+                item_section = text[text.find(name):text.find(name)+200]
+                
+                rate_match = re.search(r'"item_rate"\s*:\s*([\d.]+)', item_section)
+                if rate_match:
+                    item["item_rate"] = float(rate_match.group(1))
+                
+                qty_match = re.search(r'"item_quantity"\s*:\s*([\d.]+)', item_section)
+                if qty_match:
+                    item["item_quantity"] = float(qty_match.group(1))
+                
+                if item["item_amount"] > 0:
+                    items.append(item)
+            
+            # Pattern 2: Reverse order (amount before name)
+            if not items:
+                pattern2 = r'"item_amount"\s*:\s*([\d.]+)[^}]*?"item_name"\s*:\s*"([^"]+)"'
+                matches2 = re.findall(pattern2, text, re.DOTALL)
+                for amount, name in matches2:
+                    if float(amount) > 0:
+                        items.append({"item_name": name.strip(), "item_amount": float(amount)})
+            
+            if items:
+                # Deduplicate
+                seen = set()
+                unique_items = []
+                for item in items:
+                    key = (item["item_name"], item["item_amount"])
+                    if key not in seen:
+                        seen.add(key)
+                        unique_items.append(item)
+                
+                page_type = "Bill Detail"
+                type_match = re.search(r'"page_type"\s*:\s*"([^"]+)"', text)
+                if type_match and type_match.group(1) in ["Pharmacy", "Final Bill", "Bill Detail"]:
+                    page_type = type_match.group(1)
+                
+                logger.info(f"Page {page_num}: Regex extracted {len(unique_items)} items")
+                return {
+                    "page_no": str(page_num),
+                    "page_type": page_type,
+                    "bill_items": unique_items
+                }
+            
+            return None
+        except Exception as e:
+            logger.warning(f"Regex extraction failed: {e}")
+            return None
+    
+    def build_result(self, data: dict, page_num: int) -> Dict:
+        """Build result from parsed JSON"""
+        result = {
+            "page_no": str(page_num),
+            "page_type": data.get("page_type", "Bill Detail"),
+            "bill_items": []
+        }
+        
+        if result["page_type"] not in ["Bill Detail", "Final Bill", "Pharmacy"]:
+            result["page_type"] = "Bill Detail"
+        
+        for item in data.get("bill_items", []):
+            bill_item = {
+                "item_name": str(item.get("item_name", "")).strip(),
+                "item_amount": self.parse_num(item.get("item_amount"))
+            }
+            
+            rate = self.parse_num(item.get("item_rate"))
+            if rate > 0:
+                bill_item["item_rate"] = rate
+            
+            qty = self.parse_qty(item.get("item_quantity"))
+            if qty > 0:
+                bill_item["item_quantity"] = qty
+            
+            if bill_item["item_name"] and bill_item["item_amount"] > 0:
+                result["bill_items"].append(bill_item)
+        
+        return result
+    
     def parse_num(self, val) -> float:
-        """Parse number"""
         if val is None:
             return 0.0
         if isinstance(val, (int, float)):
             return float(val)
         try:
-            s = str(val).replace(',', '').replace('₹', '').replace('Rs.', '').replace('Rs', '').strip()
+            s = str(val).replace(',', '').replace('₹', '').strip()
             m = re.search(r'[\d.]+', s)
             return float(m.group()) if m else 0.0
         except:
             return 0.0
     
     def parse_qty(self, val) -> float:
-        """Parse quantity"""
         if val is None:
             return 0.0
         if isinstance(val, (int, float)):
             return float(val)
         try:
-            s = str(val)
-            # Remove unit suffixes
-            s = re.sub(r'\s*(No|Nos|Units?|Pcs?|Qty)\.?\s*', '', s, flags=re.IGNORECASE)
+            s = re.sub(r'\s*(No|Nos|Units?)\.?\s*', '', str(val), flags=re.IGNORECASE)
             m = re.search(r'[\d.]+', s)
             return float(m.group()) if m else 0.0
         except:
