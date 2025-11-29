@@ -9,6 +9,7 @@ from typing import List, Optional
 import uvicorn
 import os
 import logging
+import time
 
 from invoice_extractor import InvoiceExtractor
 
@@ -31,9 +32,9 @@ app = FastAPI(
     version="2.0.0"
 )
 
-# Initialize extractor (will be initialized per request if API key changes)
+# Global variables
 extractor = None
-last_response = None  # Store last response for debugging
+last_response = None
 
 def get_extractor():
     global extractor
@@ -56,7 +57,7 @@ class BillItem(BaseModel):
 
 class PageLineItems(BaseModel):
     page_no: str
-    page_type: str  # "Bill Detail" | "Final Bill" | "Pharmacy"
+    page_type: str
     bill_items: List[BillItem]
 
 class TokenUsage(BaseModel):
@@ -83,7 +84,8 @@ async def root():
         "version": "2.0.0",
         "endpoints": {
             "extract": "POST /extract-bill-data",
-            "health": "GET /health"
+            "health": "GET /health",
+            "last_response": "GET /last-response"
         }
     }
 
@@ -99,46 +101,29 @@ async def health_check():
 @app.get("/last-response")
 async def get_last_response():
     """Get the last extraction response for debugging"""
-    global last_response
     if last_response:
         return last_response
     return {"message": "No extraction performed yet"}
 
 @app.post("/extract-bill-data", response_model=ExtractionResponse)
 async def extract_bill_data(request: ExtractionRequest):
-    """
-    Extract line items and amounts from invoice document.
+    """Extract line items and amounts from invoice document."""
+    global last_response  # MUST be at the top of function
     
-    Args:
-        request: Contains document URL (image or PDF)
-        
-    Returns:
-        Extracted bill data with line items and token usage
-        
-    Note: Large PDFs (5+ pages) may take 1-3 minutes to process.
-    """
-    import time
     start_time = time.time()
     
     try:
         logger.info(f"Processing document: {request.document}")
         
-        # Get extractor instance
         ext = get_extractor()
-        
-        # Extract data
         result = ext.extract_from_url(str(request.document))
         
         elapsed = time.time() - start_time
         logger.info(f"Extraction completed in {elapsed:.1f}s")
         
         if not result:
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to extract data from document"
-            )
+            raise HTTPException(status_code=500, detail="Failed to extract data")
         
-        # Get token usage
         token_usage = ext.get_token_usage()
         
         # Format pagewise line items
@@ -159,7 +144,6 @@ async def extract_bill_data(request: ExtractionRequest):
             )
             pagewise_items.append(page_items)
         
-        # Build response
         response_data = ExtractionResponse(
             is_success=True,
             token_usage=TokenUsage(
@@ -174,10 +158,8 @@ async def extract_bill_data(request: ExtractionRequest):
         )
         
         # Store for debugging
-        global last_response
         last_response = response_data.model_dump()
         
-        # Log summary
         logger.info(f"Response: {result.get('total_item_count', 0)} items across {len(pagewise_items)} pages")
         
         return response_data
@@ -195,8 +177,6 @@ async def extract_bill_data(request: ExtractionRequest):
             error=str(e)
         )
         
-        # Store for debugging
-        global last_response
         last_response = error_response.model_dump()
         
         return error_response
@@ -204,17 +184,10 @@ async def extract_bill_data(request: ExtractionRequest):
 # ============== Run Server ==============
 
 if __name__ == "__main__":
-    # Check for API key
     if not GEMINI_API_KEY:
         print("\n" + "="*60)
         print("WARNING: GEMINI_API_KEY not set!")
         print("Get your FREE API key from: https://makersuite.google.com/app/apikey")
-        print("Then set it: export GEMINI_API_KEY='your-api-key'")
         print("="*60 + "\n")
     
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
