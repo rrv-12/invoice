@@ -23,7 +23,7 @@ class InvoiceExtractor:
         genai.configure(api_key=api_key)
         
         # Use Gemini 1.5 Flash (FREE and fast)
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        self.model = genai.GenerativeModel('gemini-2.5-flash')
         
         # Token tracking
         self.total_input_tokens = 0
