@@ -91,7 +91,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "invoice-extraction",
-        "model": "gemini-1.5-flash",
+        "model": "gemini-2.5-flash",
         "api_key_configured": bool(GEMINI_API_KEY)
     }
 
@@ -105,7 +105,12 @@ async def extract_bill_data(request: ExtractionRequest):
         
     Returns:
         Extracted bill data with line items and token usage
+        
+    Note: Large PDFs (5+ pages) may take 1-3 minutes to process.
     """
+    import time
+    start_time = time.time()
+    
     try:
         logger.info(f"Processing document: {request.document}")
         
@@ -114,6 +119,9 @@ async def extract_bill_data(request: ExtractionRequest):
         
         # Extract data
         result = ext.extract_from_url(str(request.document))
+        
+        elapsed = time.time() - start_time
+        logger.info(f"Extraction completed in {elapsed:.1f}s")
         
         if not result:
             raise HTTPException(
@@ -159,7 +167,8 @@ async def extract_bill_data(request: ExtractionRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Extraction failed: {str(e)}", exc_info=True)
+        elapsed = time.time() - start_time
+        logger.error(f"Extraction failed after {elapsed:.1f}s: {str(e)}", exc_info=True)
         return ExtractionResponse(
             is_success=False,
             token_usage=TokenUsage(total_tokens=0, input_tokens=0, output_tokens=0),
