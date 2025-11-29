@@ -2,9 +2,9 @@
 
 **HackRx Datathon Submission** - AI-powered invoice/bill data extraction using Google Gemini Vision
 
-[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.13+-blue.svg)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com)
-[![Gemini](https://img.shields.io/badge/Google-Gemini%201.5-orange.svg)](https://ai.google.dev)
+[![Gemini](https://img.shields.io/badge/Google-Gemini%202.5-orange.svg)](https://ai.google.dev)
 
 ## 🎯 Problem Statement
 
@@ -23,12 +23,12 @@ Build an API that extracts line items from multi-page hospital bills/invoices wi
 │                    Invoice/PDF URL                          │
 │                          │                                  │
 │                          ▼                                  │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │              FastAPI Endpoint                        │   │
-│  │            POST /extract-bill-data                   │   │
-│  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │              FastAPI Endpoint                       │    │
+│  │            POST /extract-bill-data                  │    │
+│  └─────────────────────────────────────────────────────┘    │
 │                          │                                  │
-│            ┌─────────────┴─────────────┐                   │
+│            ┌─────────────┴─────────────┐                    │
 │            ▼                           ▼                    │
 │       Single Image                Multi-Page PDF            │
 │            │                           │                    │
@@ -40,18 +40,18 @@ Build an API that extracts line items from multi-page hospital bills/invoices wi
 │            └──────────────┴────────────┴────────────┘       │
 │                          │                                  │
 │                          ▼                                  │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │           Google Gemini 1.5 Flash Vision            │   │
-│  │              (FREE API - 15 RPM)                     │   │
-│  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │           Google Gemini 2.5 Flash Vision            │    │
+│  │              (FREE API - 15 RPM)                    │    │
+│  └─────────────────────────────────────────────────────┘    │
 │                          │                                  │
 │                          ▼                                  │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │              JSON Response Parser                    │   │
-│  │     • Fix truncated JSON                            │   │
-│  │     • Salvage partial responses                     │   │
-│  │     • Deduplicate across pages                      │   │
-│  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │              JSON Response Parser                   │    │
+│  │     • Fix truncated JSON                            │    │
+│  │     • Salvage partial responses                     │    │
+│  │     • Deduplicate across pages                      │    │
+│  └─────────────────────────────────────────────────────┘    │
 │                          │                                  │
 │                          ▼                                  │
 │               Structured API Response                       │
@@ -62,7 +62,7 @@ Build an API that extracts line items from multi-page hospital bills/invoices wi
 
 | Feature | Description |
 |---------|-------------|
-| **LLM-Powered** | Uses Google Gemini 1.5 Flash Vision for intelligent extraction |
+| **LLM-Powered** | Uses Google Gemini 2.5 Flash Vision for intelligent extraction |
 | **Multi-Page PDF** | Supports PDFs with 10+ pages using batched processing |
 | **Smart Batching** | Sends 3 pages per API call for 3x faster processing |
 | **Blank Page Detection** | Automatically skips empty/header-only pages |
@@ -73,15 +73,15 @@ Build an API that extracts line items from multi-page hospital bills/invoices wi
 ## 📦 Installation
 
 ### Prerequisites
-- Python 3.10+
+- Python 3.13+
 - Google Gemini API Key (FREE)
 
 ### Setup
 
 ```bash
 # Clone repository
-git clone https://github.com/YOUR_USERNAME/invoice-extraction.git
-cd invoice-extraction
+git clone https://github.com/YOUR_USERNAME/invoice.git
+cd invoice
 
 # Create virtual environment
 python -m venv venv
@@ -237,7 +237,7 @@ docker run -p 8000:8000 -e GEMINI_API_KEY="your-key" invoice-extraction
 - Includes rate limiting (4.5s between batches)
 
 ### 3. LLM Extraction
-- Sends image(s) to Gemini 1.5 Flash Vision
+- Sends image(s) to Gemini 2.5 Flash Vision
 - Optimized prompt for structured JSON output
 - Handles both summary and detail pages
 
@@ -273,7 +273,7 @@ MIT License
 
 ## 👤 Author
 
-[Your Name]
+Rishav Raj Verma
 
 ---
 
