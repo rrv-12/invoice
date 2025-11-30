@@ -6,7 +6,6 @@ import logging
 from io import BytesIO
 from typing import Tuple, Optional
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
